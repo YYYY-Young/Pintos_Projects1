@@ -171,8 +171,6 @@ thread_create (const char *name, int priority,
   struct switch_entry_frame *ef;
   struct switch_threads_frame *sf;
   tid_t tid;
-  enum intr_level old_level;
-
   ASSERT (function != NULL);
 
   /* Allocate thread. */
@@ -183,11 +181,6 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
-
-  /* Prepare thread for first run by initializing its stack.
-     Do this atomically so intermediate values for the 'stack' 
-     member cannot be observed. */
-  old_level = intr_disable ();
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -203,12 +196,12 @@ thread_create (const char *name, int priority,
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
-
-  intr_set_level (old_level);
-
+  t->ticks_blocked=0;
   /* Add to run queue. */
   thread_unblock (t);
-
+  if (thread_current ()->priority < priority){
+      thread_yield ();
+    }
   return tid;
 }
 
@@ -343,7 +336,11 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  thread_current ()->base_priority = new_priority;
+  if(list_empty(&thread_current()->locks) || new_priority > thread_current()->priority){
+    thread_current()->priority = new_priority;
+    thread_yield();
+  }
 }
 
 /* Returns the current thread's priority. */
@@ -459,6 +456,8 @@ is_thread (struct thread *t)
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
+  enum intr_level old_level;
+
   ASSERT (t != NULL);
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
@@ -469,7 +468,12 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+  t->base_priority=priority;
+  list_init(&t->locks);
+  t->lock_waiting=NULL;
+  old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
+  intr_set_level (old_level);
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
@@ -495,8 +499,12 @@ next_thread_to_run (void)
 {
   if (list_empty (&ready_list))
     return idle_thread;
-  else
-    return list_entry (list_pop_front (&ready_list), struct thread, elem);
+  else{
+     struct list_elem *max_priority = list_max (&ready_list,thread_priority_cmp,NULL);
+     list_remove (max_priority);
+    return list_entry (max_priority, struct thread, elem);
+  }
+
 }
 
 /* Completes a thread switch by activating the new thread's page
@@ -585,3 +593,43 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+void
+blocked_thread_check(struct thread *t,void *aux UNUSED){
+    if (t->status == THREAD_BLOCKED && t->ticks_blocked > 0){
+        t->ticks_blocked--;
+        if (t->ticks_blocked == 0){
+            thread_unblock(t);
+        }
+    }
+}
+
+bool thread_priority_cmp(const struct list_elem *a ,const struct list_elem *b,void *aux UNUSED){
+    return list_entry(a, struct thread, elem)->priority < list_entry(b, struct thread, elem)->priority;
+}
+void thread_donate_priority(struct thread *t){
+    struct list_elem *max_priority = list_max(&t->locks,lock_priority_cmp,NULL);
+    int lock_priority = list_entry(max_priority,struct lock,elem)->max_priority;
+    if(t->priority < lock_priority)
+        t->priority = lock_priority;
+}
+void thread_hold_lock(struct lock *lock){
+    list_push_back(&thread_current()->locks,&lock->elem);
+    if(lock->max_priority > thread_current()->priority){
+       thread_current()->priority = lock->max_priority;
+       thread_yield();
+    }
+}
+void thread_update_priority(struct thread *t){
+    int priority = t->base_priority;
+    if(!list_empty(&t->locks)){
+        struct list_elem *max_priority = list_max(&t->locks,lock_priority_cmp,NULL);
+        int lock_priority = list_entry(max_priority,struct lock,elem)->max_priority;
+        if(priority < lock_priority)
+            priority = lock_priority;
+    }
+    t->priority=priority;
+}
+bool lock_priority_cmp(const struct list_elem *a,const struct list_elem *b,void *aux UNUSED){
+    return list_entry(a,struct lock,elem)->max_priority < list_entry(b,struct lock,elem)->max_priority;
+}
