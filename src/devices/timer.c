@@ -17,8 +17,13 @@
 #error TIMER_FREQ <= 1000 recommended
 #endif
 
+#define RECALCULATION_FREQ 4
+
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
+
+/* 睡眠进程队列*/
+static struct list sleep_list;
 
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
@@ -37,6 +42,8 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+  /* 初始化睡眠进程*/
+  list_init (&sleep_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -86,26 +93,32 @@ timer_elapsed (int64_t then)
 
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
-int checkticks(int64_t ticks)
-{
-if(ticks<=0)
-{
-  return 0;
-}
-  return 1;
-}
-
 void
 timer_sleep (int64_t ticks) 
 {
- if(checkticks(ticks)==0){
-    return;}
+  /*
+  int64_t start = timer_ticks ();
+
   ASSERT (intr_get_level () == INTR_ON);
-   enum intr_level old_level = intr_disable ();
-   struct thread *current_thread = thread_current ();
-   current_thread->ticks_blocked = ticks;
-   thread_block ();
-   intr_set_level (old_level);
+  while (timer_elapsed (start) < ticks) 
+    thread_yield ();
+  */
+
+  ASSERT (intr_get_level () == INTR_ON);
+  /* In case of ridiculous invoking. */
+  if (ticks < 0) {
+    // printf("ticks < 0 when invoking timer_sleep...");
+    return;
+  }
+  /* 屏蔽中断 */
+  enum intr_level old_level = intr_disable ();
+  /* 增加到睡眠队列 */
+  thread_current ()->wake_up_ticks = timer_ticks () + ticks;
+  list_push_back (&sleep_list, &thread_current ()->elem);
+  thread_block ();
+
+  /* 开启中断 */
+  intr_set_level (old_level);
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -183,8 +196,38 @@ static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
-  thread_foreach(check_thread_blocked,NULL);
   thread_tick ();
+
+  /* 如果使用4.4BSD Scheduler. */
+  if (thread_mlfqs) {
+    if (ticks % TIMER_FREQ == 0) {
+      mlfqs_increment ();
+      mlfqs_load_avg ();
+      mlfqs_recalculate ();
+    }
+    else if (ticks % RECALCULATION_FREQ == 0) {
+      mlfqs_increment ();
+      mlfqs_priority (thread_current ());
+    }
+    /* RECALCULATION_FREQ (4) % TIME_SLICE (4) == 0, TIMER_FREQ (100) % TIME_SLICE (4) == 0 */
+    /* These settings are on purpose! */
+    /* When the priority is updated, the current thread is 100% to yield. */
+    /* So don't worry, nothing would go wrong. The priority scheduling still works. */
+  }
+
+  /* Query the sleep_list and wake up threads. */
+  struct list_elem *e;
+  for (e = list_begin (&sleep_list); e != list_end (&sleep_list); ) {
+    struct thread *t = list_entry (e, struct thread, elem);      
+    if (ticks >= t->wake_up_ticks) {
+      /* 取出队列，唤醒进程 */
+      e = list_remove (e);
+      thread_unblock (t);
+    } else {
+      e = list_next (e);
+    }
+  }
+  /* To sum up, There is no need to check 'is_cur_max_priority' here. */
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer

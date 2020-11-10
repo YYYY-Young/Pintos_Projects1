@@ -100,8 +100,19 @@ struct thread
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
-    
-    int64_t ticks_blocked;
+
+    /* Alarm所用数据结构 */
+    int64_t wake_up_ticks;
+
+    /* 捐赠所用数据结构 */
+    struct list donors_list;
+    struct list_elem donors_elem;
+    int original_priority;
+    struct lock *lock_waiting;
+
+    /*  4.4BSD Scheduler所用数据结构. */
+    int nice;   /* Niceness is in [-20,20] */
+    int recent_cpu; /* Fixed-point number format for '100 times' test. */
   };
 
 /* If false (default), use round-robin scheduler.
@@ -139,8 +150,20 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
-void check_thread_blocked(struct thread *t,void *aux UNUSED);
-bool thread_cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
 
+/* 比较优先级 */
+bool is_gt_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
+/* 检查是否为优先级最大 */
+void is_cur_max_priority (void);
+
+/* 捐赠优先级函数 */
+void donate_priority (void);
+
+/*  4.4BSD Scheduler函数*/
+void mlfqs_priority (struct thread *t);
+void mlfqs_recent_cpu (struct thread *t);
+void mlfqs_load_avg (void);
+void mlfqs_recalculate (void);
+void mlfqs_increment (void);
 
 #endif /* threads/thread.h */
